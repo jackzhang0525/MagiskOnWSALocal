@@ -124,6 +124,7 @@ MAGISK_VER_MAP=(
     "beta"
     "canary"
     "debug"
+    "release"
 )
 
 GAPPS_BRAND_MAP=(
@@ -148,6 +149,13 @@ ROOT_SOL_MAP=(
     "magisk"
     "none"
 )
+
+COMPRESS_FORMAT_MAP=(
+    "7z"
+    "xz"
+    "zip"
+)
+
 ARR_TO_STR() {
     local arr=("$@")
     local joined
@@ -190,9 +198,15 @@ usage() {
                     Possible values: $(ARR_TO_STR "${ROOT_SOL_MAP[@]}")
                     Default: $ROOT_SOL
 
+    --compress-format
+                    Compress format of output file.
+                    If this option is not specified and --compress is not specified, the generated file will not be compressed
+
+                    Possible values: $(ARR_TO_STR "${COMPRESS_FORMAT_MAP[@]}")
+
 Additional Options:
     --remove-amazon Remove Amazon Appstore from the system
-    --compress      Compress the WSA
+    --compress      Compress the WSA, The default format is 7z, you can use the format specified by --compress-format
     --offline       Build WSA offline
     --magisk-custom Install custom Magisk
     --debug         Debug build mode
@@ -213,6 +227,7 @@ ARGUMENT_LIST=(
     "gapps-brand:"
     "gapps-variant:"
     "root-sol:"
+    "compress-format:"
     "remove-amazon"
     "compress"
     "offline"
@@ -236,14 +251,15 @@ while [[ $# -gt 0 ]]; do
    case "$1" in
         --arch            ) ARCH="$2"; shift 2 ;;
         --release-type    ) RELEASE_TYPE="$2"; shift 2 ;;
-        --magisk-ver      ) MAGISK_VER="$2"; shift 2 ;;
         --gapps-brand     ) GAPPS_BRAND="$2"; shift 2 ;;
         --gapps-variant   ) GAPPS_VARIANT="$2"; shift 2 ;;
         --root-sol        ) ROOT_SOL="$2"; shift 2 ;;
+        --compress-format ) COMPRESS_FORMAT="$2"; shift 2 ;;
         --remove-amazon   ) REMOVE_AMAZON="remove"; shift ;;
         --compress        ) COMPRESS_OUTPUT="yes"; shift ;;
         --offline         ) OFFLINE="on"; shift ;;
         --magisk-custom   ) CUSTOM_MAGISK="debug"; MAGISK_VER=$CUSTOM_MAGISK; shift ;;
+        --magisk-ver      ) MAGISK_VER="$2"; shift 2 ;;
         --debug           ) DEBUG="on"; shift ;;
         --help            ) usage; exit 0 ;;
         --                ) shift; break;;
@@ -252,20 +268,22 @@ done
 
 check_list() {
     local input=$1
-    local name=$2
-    shift
-    local arr=("$@")
-    local list_count=${#arr[@]}
-    for i in "${arr[@]}"; do
-        if [ "$input" == "$i" ]; then
-            echo "INFO: $name: $input"
-            break
-        fi
-        ((list_count--))
-        if (("$list_count" <= 0)); then
-            exit_with_message "Invalid $name: $input"
-        fi
-    done
+    if [ -n "$input" ]; then
+        local name=$2
+        shift
+        local arr=("$@")
+        local list_count=${#arr[@]}
+        for i in "${arr[@]}"; do
+            if [ "$input" == "$i" ]; then
+                echo "INFO: $name: $input"
+                break
+            fi
+            ((list_count--))
+            if (("$list_count" <= 0)); then
+                exit_with_message "Invalid $name: $input"
+            fi
+        done
+    fi
 }
 
 check_list "$ARCH" "Architecture" "${ARCH_MAP[@]}"
@@ -274,6 +292,7 @@ check_list "$MAGISK_VER" "Magisk Version" "${MAGISK_VER_MAP[@]}"
 check_list "$GAPPS_BRAND" "GApps Brand" "${GAPPS_BRAND_MAP[@]}"
 check_list "$GAPPS_VARIANT" "GApps Variant" "${GAPPS_VARIANT_MAP[@]}"
 check_list "$ROOT_SOL" "Root Solution" "${ROOT_SOL_MAP[@]}"
+check_list "$COMPRESS_FORMAT" "Compress Format" "${COMPRESS_FORMAT_MAP[@]}"
 
 if [ "$DEBUG" ]; then
     set -x
@@ -294,13 +313,20 @@ RELEASE_NAME=${RELEASE_NAME_MAP[$RELEASE_TYPE]} || abort
 echo -e "Build: RELEASE_TYPE=$RELEASE_NAME"
 
 WSA_ZIP_PATH=$DOWNLOAD_DIR/wsa-$ARCH-$RELEASE_TYPE.zip
-vclibs_PATH=$DOWNLOAD_DIR/vclibs-"$ARCH".appx
-xaml_PATH=$DOWNLOAD_DIR/xaml-"$ARCH".appx
-MAGISK_PATH=$DOWNLOAD_DIR/magisk-$MAGISK_VER.zip
+vclibs_PATH=$DOWNLOAD_DIR/Microsoft.VCLibs."$ARCH".14.00.Desktop.appx
+xaml_PATH=$DOWNLOAD_DIR/Microsoft.UI.Xaml_"$ARCH".appx
+MAGISK_ZIP=magisk-$MAGISK_VER.zip
+MAGISK_PATH=$DOWNLOAD_DIR/$MAGISK_ZIP
 if [ "$CUSTOM_MAGISK" ]; then
     if [ ! -f "$MAGISK_PATH" ]; then
-        echo "Custom Magisk not found, please rename it to magisk-debug.zip and put it in $DOWNLOAD_DIR"
-        abort
+        echo "Custom Magisk $MAGISK_ZIP not found"
+        MAGISK_ZIP=app-$MAGISK_VER.apk
+        echo "Fallback to $MAGISK_ZIP"
+        MAGISK_PATH=$DOWNLOAD_DIR/$MAGISK_ZIP
+        if [ ! -f "$MAGISK_PATH" ]; then
+            echo -e "Custom Magisk $MAGISK_ZIP not found\nPlease put custom Magisk in $DOWNLOAD_DIR"
+            abort
+        fi
     fi
 fi
 if [ "$GAPPS_BRAND" = "OpenGApps" ]; then
@@ -472,6 +498,11 @@ if [ "$REMOVE_AMAZON" ]; then
     echo -e "done\n"
 fi
 
+echo "Add device administration features"
+$SUDO sed -i -e '/cts/a \ \ \ \ <feature name="android.software.device_admin" />' -e '/print/i \ \ \ \ <feature name="android.software.managed_users" />' "$MOUNT_DIR"/vendor/etc/permissions/windows.permissions.xml
+$SUDO setfattr -n security.selinux -v "u:object_r:vendor_configs_file:s0" "$MOUNT_DIR"/vendor/etc/permissions/windows.permissions.xml || abort
+echo -e "done\n"
+
 if [ "$ROOT_SOL" = 'magisk' ] || [ "$ROOT_SOL" = '' ]; then
     echo "Integrate Magisk"
     $SUDO mkdir "$MOUNT_DIR"/sbin
@@ -484,6 +515,7 @@ if [ "$ROOT_SOL" = 'magisk' ] || [ "$ROOT_SOL" = '' ]; then
 #!/system/bin/sh
 mkdir -p /data/adb/magisk
 cp /sbin/* /data/adb/magisk/
+sync
 chmod -R 755 /data/adb/magisk
 restorecon -R /data/adb/magisk
 for module in \$(ls /data/adb/modules); do
@@ -525,8 +557,9 @@ on post-fs-data
     mkdir /dev/$TMP_PATH/.magisk/mirror 700
     mkdir /dev/$TMP_PATH/.magisk/block 700
     copy /sbin/magisk.apk /dev/$TMP_PATH/stub.apk
+    chmod 0644 /dev/$TMP_PATH/stub.apk
     rm /dev/.magisk_unblock
-    start $SERVER_NAME1
+    exec_start $SERVER_NAME1
     start $SERVER_NAME2
     wait /dev/.magisk_unblock 40
     rm /dev/.magisk_unblock
@@ -582,9 +615,6 @@ find ../"$ARCH"/system/system/priv-app/ -maxdepth 1 -mindepth 1 -printf '%P\n' |
 find ../"$ARCH"/system/system/priv-app/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/priv-app/placeholder -type f -exec chmod 0644 {} \;
 find ../"$ARCH"/system/system/priv-app/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/priv-app/placeholder -exec chown root:root {} \;
 find ../"$ARCH"/system/system/priv-app/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/priv-app/placeholder -exec setfattr -n security.selinux -v "u:object_r:system_file:s0" {} \; || abort
-find ../"$ARCH"/system/system/etc/permissions/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/etc/permissions/placeholder -type f -exec chmod 0644 {} \;
-find ../"$ARCH"/system/system/etc/permissions/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/etc/permissions/placeholder -exec chown root:root {} \;
-find ../"$ARCH"/system/system/etc/permissions/ -maxdepth 1 -mindepth 1 -printf '%P\n' | xargs -I placeholder $SUDO find "$MOUNT_DIR"/system/etc/permissions/placeholder -type f -exec setfattr -n security.selinux -v "u:object_r:system_file:s0" {} \; || abort
 echo -e "Add extra packages done\n"
 
 if [ "$GAPPS_BRAND" != 'none' ]; then
@@ -683,6 +713,16 @@ function Test-Administrator {
     }
 }
 
+function Get-InstalledDependencyVersion {
+    param (
+        [string]\$Name,
+        [string]\$ProcessorArchitecture
+    )
+    process {
+        return Get-AppxPackage -Name \$Name | ForEach-Object { if (\$_.Architecture -eq \$ProcessorArchitecture) { \$_ } } | Sort-Object -Property Version | Select-Object -ExpandProperty Version -Last 1;
+    }
+}
+
 function Finish {
     Clear-Host
     Start-Process "wsa://com.topjohnwu.magisk"
@@ -691,7 +731,7 @@ function Finish {
 
 If (-Not (Test-Administrator)) {
     Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force
-    \$proc = Start-Process -PassThru -WindowStyle Hidden -Verb RunAs powershell.exe -Args "-ExecutionPolicy Bypass -Command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath' EVAL"
+    \$proc = Start-Process -PassThru -WindowStyle Hidden -Verb RunAs ConHost.exe -Args "powershell -ExecutionPolicy Bypass -Command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath' EVAL"
     \$proc.WaitForExit()
     If (\$proc.ExitCode -Ne 0) {
         Clear-Host
@@ -701,7 +741,7 @@ If (-Not (Test-Administrator)) {
     exit
 }
 ElseIf ((\$args.Count -Eq 1) -And (\$args[0] -Eq "EVAL")) {
-    Start-Process powershell.exe -Args "-ExecutionPolicy Bypass -Command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath'"
+    Start-Process ConHost.exe -Args "powershell -ExecutionPolicy Bypass -Command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath'"
     exit
 }
 
@@ -726,11 +766,27 @@ If (\$(Get-WindowsOptionalFeature -Online -FeatureName 'VirtualMachinePlatform')
     }
 }
 
-Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path vclibs-$ARCH.appx
-Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path xaml-$ARCH.appx
+[xml]\$Xml = Get-Content ".\AppxManifest.xml";
+\$Name = \$Xml.Package.Identity.Name;
+\$ProcessorArchitecture = \$Xml.Package.Identity.ProcessorArchitecture;
+\$Dependencies = \$Xml.Package.Dependencies.PackageDependency;
+\$Dependencies | ForEach-Object {
+    If (\$_.Name -Eq "Microsoft.VCLibs.140.00.UWPDesktop") {
+        \$HighestInstalledVCLibsVersion = Get-InstalledDependencyVersion -Name \$_.Name -ProcessorArchitecture \$ProcessorArchitecture;
+        If ( \$HighestInstalledVCLibsVersion -Lt \$_.MinVersion ) {
+            Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path "Microsoft.VCLibs.\$ProcessorArchitecture.14.00.Desktop.appx"
+        }
+    }
+    ElseIf (\$_.Name -Match "Microsoft.UI.Xaml") {
+        \$HighestInstalledXamlVersion = Get-InstalledDependencyVersion -Name \$_.Name -ProcessorArchitecture \$ProcessorArchitecture;
+        If ( \$HighestInstalledXamlVersion -Lt \$_.MinVersion ) {
+            Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path "Microsoft.UI.Xaml_\$ProcessorArchitecture.appx"
+        }
+    }
+}
 
 \$Installed = \$null
-\$Installed = Get-AppxPackage -Name 'MicrosoftCorporationII.WindowsSubsystemForAndroid'
+\$Installed = Get-AppxPackage -Name \$Name
 
 If ((\$null -Ne \$Installed) -And (-Not (\$Installed.IsDevelopmentMode))) {
     Clear-Host
@@ -808,13 +864,35 @@ fi
 if [ ! -d "$OUTPUT_DIR" ]; then
     mkdir -p "$OUTPUT_DIR"
 fi
-if [ "$COMPRESS_OUTPUT" ]; then
-    rm -f "${OUTPUT_DIR:?}"/"$artifact_name.7z" || abort
+OUTPUT_PATH="${OUTPUT_DIR:?}/$artifact_name"
+if [ "$COMPRESS_OUTPUT" ] || [ -n "$COMPRESS_FORMAT" ]; then
     mv "$WORK_DIR/wsa/$ARCH" "$WORK_DIR/wsa/$artifact_name"
-    7z a "$OUTPUT_DIR"/"$artifact_name.7z" "$WORK_DIR/wsa/$artifact_name" || abort
+    if [ -z "$COMPRESS_FORMAT" ]; then
+        COMPRESS_FORMAT="7z"
+    fi
+    if [ -n "$COMPRESS_FORMAT" ]; then
+        FILE_EXT=".$COMPRESS_FORMAT"
+        if [ "$FILE_EXT" = ".xz" ]; then
+            FILE_EXT=".tar$FILE_EXT"
+        fi
+        OUTPUT_PATH="$OUTPUT_PATH$FILE_EXT"
+    fi
+    rm -f "${OUTPUT_PATH:?}" || abort
+    if [ "$COMPRESS_FORMAT" = "7z" ]; then
+        echo "Compressing with 7z"
+        7z a "${OUTPUT_PATH:?}" "$WORK_DIR/wsa/$artifact_name" || abort
+    elif [ "$COMPRESS_FORMAT" = "xz" ]; then
+        echo "Compressing with tar xz"
+        if ! (tar -cP -I 'xz -9 -T0' -f "${OUTPUT_PATH:?}" "$WORK_DIR/wsa/$artifact_name"); then
+            echo "Out of memory? Trying again with single threads..."
+            tar -cPJvf "${OUTPUT_PATH:?}" "$WORK_DIR/wsa/$artifact_name" || abort
+        fi
+    elif [ "$COMPRESS_FORMAT" = "zip" ]; then
+        7z -tzip a "${OUTPUT_PATH:?}" "$WORK_DIR/wsa/$artifact_name" || abort
+    fi
 else
-    rm -rf "${OUTPUT_DIR:?}/${artifact_name}" || abort
-    cp -r "$WORK_DIR"/wsa/"$ARCH" "$OUTPUT_DIR/$artifact_name" || abort
+    rm -rf "${OUTPUT_PATH:?}" || abort
+    cp -r "$WORK_DIR"/wsa/"$ARCH" "$OUTPUT_PATH" || abort
 fi
 echo -e "done\n"
 
